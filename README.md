@@ -130,15 +130,43 @@ produces a signature that is wrong in a way no unit test catches, because both
 sides of a self-consistent test agree — you find out when a real service
 returns 403. `-hmac-sha256` returns a Buffer and only `-hex` ever stringifies.
 
-### Known gap
+### Two bugs the unit suite could not have found
 
-No live read/write conformance run yet. `kura.node.contract/verify` passes
-against the in-memory and faked-HTTP backends, which proves the adapter's
-logic; it does not prove that a particular provider honours `Range`, returns
-`content-length` on HEAD, or respects the `prefix` parameter on list. Those
-are exactly the claims "S3-compatible" makes and does not guarantee — and the
-reason `-list-shards` re-filters client-side. Phase 0 needs a dedicated bucket
-to close this.
+Both were found by running the real code against a real object store, and both
+are the same shape: **a test that supplies its own world agrees with itself.**
+
+**1. The synchronous protocol cannot survive an async transport.**
+`kura.node.store/IShardStore` is synchronous. Every host a node actually runs
+on — Node, a Worker — has async I/O. `s3/send!` returned whatever the injected
+transport returned, `ok?` read `:status` off it, and a promise has no
+`:status`, so it was falsy: **every read reported the shard absent, every
+write reported success.** The suite passed because `FakeHttp` is synchronous.
+
+Fixed by `kura.node.async/IAsyncShardStore` — a separate protocol, not a
+promise-shaped patch on the sync one, because a contract that is sometimes
+synchronous is a contract nobody can implement correctly.
+(`kotobase.storage` split the same way, for the same reason.) The sync
+protocol is **not** deprecated: it is right for in-memory and for genuinely
+blocking I/O. What was wrong was pretending an async transport satisfied it.
+
+**2. `:advanced` renames un-inferred property reads.** `(.-objects res)` on the
+R2 list result became `.-Xa` and returned `undefined`, so listing came back
+empty while eighteen other assertions passed. Method *calls* survive; property
+*reads* do not. No unit test runs through `:advanced`, so none could catch it.
+`^js` hints on every property read, and the reason is at the call site.
+
+### Live conformance
+
+`kura-conformance` runs `kura.node.async/verify>` inside a Worker against a
+real R2 bucket and returns the result as JSON — a conformance run is a URL
+anyone can fetch, not a claim in a README:
+
+**https://kura-conformance.04-feasts-minded.workers.dev/conformance** — 19/19.
+
+`/audit` reports what a fleet of 26 such backends is actually worth:
+`{effective-domains: 1, largest-domain: 26, survivable?: false}`. One bucket
+is one failure domain however many prefixes are carved out of it, and the
+harness says so about itself.
 
 ## Tests
 
