@@ -73,6 +73,19 @@
     (assoc headers "authorization"
            (sigv4/authorization-header key-id scope signed-headers sig))))
 
+(defn object-path
+  "Canonical path for `key` in `bucket`. Re-exported so a host adapter can
+  shape a request without reaching around this namespace into sigv4 — the
+  path encoding is part of what gets signed, and two places deriving it
+  independently is how a signature silently stops matching its own URL."
+  [bucket key]
+  (sigv4/object-path bucket key))
+
+(defn canonical-query
+  "Canonical query string. Re-exported for the same reason as `object-path`."
+  [params]
+  (sigv4/canonical-query params))
+
 ;; --- request shaping -------------------------------------------------------
 
 (defn- shard-key [prefix shard-id]

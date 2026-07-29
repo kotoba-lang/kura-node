@@ -100,6 +100,46 @@ does.
   for, and a node that throws there has that path exercised by every over-eager
   client on the network.
 
+## Live: the signature is proven against a real service
+
+`kura.node.s3` is pure by design — request shaping is a function of its
+inputs, testable without credentials. `kura.node.host-node` is the other half:
+`node:crypto` and `fetch`, the one file in this repo that is host-specific.
+
+`script/live_sigv4_check.cljs` closes the loop by signing a **read-only**
+ListObjectsV2 against a real S3-compatible bucket. A wrong signature returns
+403, so a 200 proves the whole SigV4 ladder — canonical request, credential
+scope, the four-step key derivation, the authorization header — end to end.
+
+```
+$ B2_KEY_ID=... B2_APP_KEY=... B2_BUCKET=... nbb --classpath "src:..." \
+    script/live_sigv4_check.cljs
+status: 200
+SIGV4 OK — service accepted the signature
+```
+
+Verified against Backblaze B2 (`s3.us-west-004.backblazeb2.com`) on
+2026-07-29. Read-only on purpose: the credential to hand is scoped to an
+existing archive bucket, and writing conformance fixtures into somebody's
+archive to test our own code is not a trade this repo makes. Full read/write
+conformance needs a bucket of its own — see the gap below.
+
+**The SigV4 hazard this file exists to contain:** the key-derivation ladder
+feeds each HMAC's *raw* digest into the next. Hex-encoding between steps
+produces a signature that is wrong in a way no unit test catches, because both
+sides of a self-consistent test agree — you find out when a real service
+returns 403. `-hmac-sha256` returns a Buffer and only `-hex` ever stringifies.
+
+### Known gap
+
+No live read/write conformance run yet. `kura.node.contract/verify` passes
+against the in-memory and faked-HTTP backends, which proves the adapter's
+logic; it does not prove that a particular provider honours `Range`, returns
+`content-length` on HEAD, or respects the `prefix` parameter on list. Those
+are exactly the claims "S3-compatible" makes and does not guarantee — and the
+reason `-list-shards` re-filters client-side. Phase 0 needs a dedicated bucket
+to close this.
+
 ## Tests
 
 ```bash
