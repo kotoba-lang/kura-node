@@ -168,6 +168,39 @@ anyone can fetch, not a claim in a README:
 is one failure domain however many prefixes are carved out of it, and the
 harness says so about itself.
 
+### The multi-provider fleet, and what the audit says about it
+
+`kura.node.r2` covers a single provider with no HTTP at all. But **one provider
+is one failure domain**, and ADR-2607299200 section 1's entire model assumes
+shard losses are independent — so reaching a second provider is not a nice-to-
+have, it is the thing that makes the storage multiplier worth paying for.
+Reaching another provider means HTTP, HTTP means async, and that is
+`kura.node.s3-async`.
+
+Crypto and transport are split (`kura.node.crypto-noble`,
+`kura.node.http-fetch`) because the Worker build cannot resolve `node:crypto`,
+and because `crypto.subtle` is **async** while `s3/sign` is a straight-line
+derivation with no I/O in it. Making the signer async to accommodate the host's
+crypto API would push promises through every caller of a pure function;
+`@noble/hashes` is synchronous, audited, and already what
+`kotobase-protocols-worker` uses for the same reason.
+
+Live, both providers, 19/19 each:
+**https://kura-conformance.04-feasts-minded.workers.dev/conformance**
+
+And the audit that matters — `/audit` — currently says **no**:
+
+| layout | shards | tolerates | domains | need | largest | survivable |
+|---|---|---|---|---|---|---|
+| launch | 32 | 13 | 2 | ≥3 | 16 | ✗ |
+| target | 26 | 7 | 2 | ≥4 | 13 | ✗ |
+
+Two providers spread 32 shards 16-and-16, and 16 is more than 13. The number
+is not a judgement call: `ceil(shards / tolerated)` is the minimum count of
+genuinely independent domains, and until the fleet has that many the code's
+tolerance is decoration. That is what this harness is for — turning "spread it
+across providers" into an integer that is either satisfied or not.
+
 ## Tests
 
 ```bash
