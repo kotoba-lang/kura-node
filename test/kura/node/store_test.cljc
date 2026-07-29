@@ -75,6 +75,29 @@
     (is (= 1 (:largest-domain a)))
     (is (true? (:survivable? a)))))
 
+(deftest independence-is-read-from-the-declaration-not-the-node-id
+  (testing "eleven shard slots on ONE machine are one failure domain. Keying
+            :independent on node-id made them eleven, which meant an audit
+            could be satisfied by renaming — found by this repo's own
+            local-node demo reporting 13 domains for a three-machine fleet."
+    (let [one-box (mapv #(store/descriptor {:node-id (str "fs-" %)
+                                            :independence :independent
+                                            :failure-domain {:operator "alice" :site "home"}})
+                        (range 11))
+          a (store/audit one-box 13)]
+      (is (= 1 (:effective-domains a)) "one machine, one domain")
+      (is (= 11 (:largest-domain a))))
+    (testing "and two machines in different places are two"
+      (let [two (into (mapv #(store/descriptor {:node-id (str "a-" %)
+                                                :independence :independent
+                                                :failure-domain {:operator "alice" :site "home"}})
+                            (range 5))
+                      (mapv #(store/descriptor {:node-id (str "b-" %)
+                                                :independence :independent
+                                                :failure-domain {:operator "bob" :site "office"}})
+                            (range 5)))]
+        (is (= 2 (:effective-domains (store/audit two 13))))))))
+
 (deftest audit-of-nothing-is-reported-not-crashed
   (let [a (store/audit [] 7)]
     (is (= 0 (:backends a)))

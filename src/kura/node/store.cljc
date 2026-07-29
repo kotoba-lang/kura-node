@@ -101,13 +101,21 @@
 (defn- domain-key
   "The key two backends must share to be one failure domain.
 
-  For `:shared-substrate` that is the whole declared domain — same bucket is
-  same bucket. For `:shared-provider` it is the provider alone, since a
-  regional outage or a suspended account takes every bucket with it. An
-  `:independent` backend is its own domain and is keyed by node id."
-  [{:keys [node-id failure-domain independence]}]
+  **The declared `:failure-domain` is the domain; the profile says how
+  coarsely to read it.** `:shared-provider` collapses to the provider alone,
+  because a regional outage or a suspended account takes every bucket with it.
+  The other two key on the whole declaration.
+
+  `:independent` used to key on the NODE ID, which was wrong in a way that
+  flattered every fleet: eleven shard slots on one machine then counted as
+  eleven failure domains, and an audit that counts domains by node id can be
+  satisfied by renaming. Found by this repo's own local-node demo producing
+  `domains 13` for a three-machine fleet. What makes two self-hosted nodes
+  independent is being in different places, which is exactly what the operator
+  declares — so that is what is read."
+  [{:keys [failure-domain independence]}]
   (case independence
-    :independent [:independent node-id]
+    :independent [:independent (into (sorted-map) failure-domain)]
     :shared-provider [:provider (get failure-domain :provider)]
     :shared-substrate [:substrate (into (sorted-map) failure-domain)]))
 
