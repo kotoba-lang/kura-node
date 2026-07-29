@@ -201,6 +201,45 @@ genuinely independent domains, and until the fleet has that many the code's
 tolerance is decoration. That is what this harness is for — turning "spread it
 across providers" into an integer that is either satisfied or not.
 
+## Running a node
+
+`kura.node.fs` made a self-hosted node possible. This makes it a command —
+and the distance between those two is why the fleet is still short a failure
+domain, because **a backend nobody can start is not a node.**
+
+```bash
+nbb --classpath "src:script:../kura/src:../erasure/src:../merkle-sum/src:../sigv4/src" \
+  script/run_node.cljs --root ~/kura-data --port 8080 \
+  --node-id my-node --operator alice --site home
+```
+
+Serves the async shard-store contract over HTTP, so a coordinator probes a
+self-hosted node exactly the way it probes a rented bucket — a self-hosted node
+is not a special case anywhere in the system. `GET /self-check` runs the full
+contract against the real disk; verified 19/19 on a live run, including a
+ranged read.
+
+`--operator` is required and the assertion says why: the audit reads the
+declared failure domain to decide how many **independent** domains a fleet
+has, and two nodes sharing an operator and a site are one domain however they
+are named.
+
+### Three things it is not
+
+- **Not authenticated.** Phase 0 holds no customer data and takes no bond, so
+  there is nothing to steal. `--accept-customer-data` is refused by an
+  assertion rather than left as a TODO, because a node quietly serving
+  unauthenticated writes with real data on it is the failure this project
+  keeps trying not to ship. Wire `kura.order/admit` and a coordinator public
+  key first.
+- **Not reachable.** Binding a port is not a public address. Behind NAT you
+  need a tunnel or a forwarded port; the coordinator cannot probe what it
+  cannot reach, and an unreachable node reads as a dead one.
+- **Not redundant on its own.** One disk, no RAID. That is fine — absorbing a
+  lost shard is exactly what the erasure code is for — but the operator should
+  know that is the arrangement rather than assume the network protects their
+  disk.
+
 ## Tests
 
 ```bash
