@@ -204,7 +204,15 @@
                                                          :size size :stripe-bytes sb}
                                                         layout)]
                                 (-> (with-retry> 4 #(obj/put-object!> {:plan plan :store-for store-for
-                                                                       :digest digest :bytes body}))
+                                                                       :digest digest :bytes body
+                                                                       ;; B2 drops a whole batch of 8
+                                                                       ;; when it closes its keep-alive
+                                                                       ;; socket, and 8 of 32 is well
+                                                                       ;; inside a tolerance of 13. All
+                                                                       ;; or nothing would fail every
+                                                                       ;; multi-megabyte object to a
+                                                                       ;; loss the code exists to absorb.
+                                                                       :allow-degraded true}))
                                     (.then (fn [r]
                                              (-> acc
                                                  (update :stored inc)
@@ -213,7 +221,9 @@
                                                  (update :receipts conj
                                                          {:key k :size size :stripe-bytes sb
                                                           :stripes (:stripes r)
-                                                          :digest (:digest r)})
+                                                          :digest (:digest r)
+                                                          :degraded? (:degraded? r)
+                                                          :missing (:missing-shards r)})
                                                  (as-> acc2
                                                        (do
                                                          ;; Written after EVERY object, not at the
@@ -237,6 +247,8 @@
                  (println)
                  (println "stored  :" (:stored r) "objects · skipped" (:skipped r)
                           "· failed" (:failed r))
+                 (println "degraded:" (count (filter :degraded? (:receipts r)))
+                          "objects wrote short of full redundancy (readable, repair pending)")
                  (println "logical :" (.toFixed (/ (:logical-bytes r) 1e6) 1) "MB")
                  (println "physical:" (.toFixed (/ (:physical-bytes r) 1e6) 1) "MB"
                           (str "(" (.toFixed (/ (:physical-bytes r) (max 1 (:logical-bytes r))) 3) "x)"))

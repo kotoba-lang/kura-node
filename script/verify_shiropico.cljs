@@ -18,6 +18,7 @@
             [erasure.lrc :as lrc]
             [kura.manifest :as manifest]
             [kura.node.crypto-noble :as nc]
+            [kura.node.gf :as gf]
             [kura.node.http-fetch :as hf]
             [kura.node.http-node :as hn]
             [kura.node.object :as obj]
@@ -91,7 +92,7 @@
                               (.then (fn [g]
                                        (-> acc
                                            (update :ok inc)
-                                           (update :bytes + (count (js->clj (:bytes g))))
+                                           (update :bytes + (gf/blength (:bytes g)))
                                            (update :repaired + (:repaired g)))))
                               (.catch (fn [e]
                                         (println "  FAIL" key "-" (.-message e))
