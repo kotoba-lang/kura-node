@@ -121,13 +121,22 @@
         port (js/parseInt (arg "--port" "8080"))
         node-id (arg "--node-id" "self-hosted-1")
         operator (arg "--operator" nil)
-        site (arg "--site" "default")]
+        site (arg "--site" nil)]
     (assert root "--root is required (a directory this node may write to)")
     (assert operator
             (str "--operator is required. It is not decoration: the audit reads "
                  "the declared failure domain to decide how many INDEPENDENT "
                  "domains a fleet has, and two nodes that share an operator and "
                  "a site are one domain however they are named."))
+    (assert site
+            (str "--site is required, and it names a PLACE, not a machine. "
+                 "Ten machines in one room are one failure domain: one power "
+                 "feed, one uplink, one flood. Passing a hostname here — which "
+                 "is the obvious thing to reach for, and which this project's "
+                 "own first deployment did — makes each box look like its own "
+                 "domain and inflates the fleet's durability by however many "
+                 "boxes are in the room. Use somewhere you could lose all at "
+                 "once: \"tokyo-office\", \"home\", \"osaka-colo\"."))
     ;; The refusal promised in the namespace docstring, as an assertion rather
     ;; than a TODO.
     (assert (not (flag? "--accept-customer-data"))

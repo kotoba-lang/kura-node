@@ -219,10 +219,29 @@ is not a special case anywhere in the system. `GET /self-check` runs the full
 contract against the real disk; verified 19/19 on a live run, including a
 ranged read.
 
-`--operator` is required and the assertion says why: the audit reads the
-declared failure domain to decide how many **independent** domains a fleet
-has, and two nodes sharing an operator and a site are one domain however they
-are named.
+`--operator` and `--site` are both required, and the assertions say why.
+
+`--site` names **a place, not a machine.** Ten machines in one room are one
+failure domain: one power feed, one uplink, one flood. Passing a hostname is
+the obvious thing to reach for, and this project's own first deployment did
+exactly that — `--site $(hostname -s)` — which would have made each box its own
+domain and inflated the fleet's durability by however many boxes are in the
+room. That is the same flaw the `fs` demo exposed in `domain-key`, reintroduced
+one layer up within a day of fixing it. Now it is impossible to reach for by
+accident: there is no default.
+
+### Live on owned hardware
+
+Deployed to a Mac mini on a tailnet, 2026-07-30: contract **19/19** against its
+real disk, a real PUT/GET/ranged-GET/DELETE round trip, and with the two rented
+backends the placement audits as **3 domains, largest 11, survivable** for the
+launch layout. Zero purchase — the machine was already there.
+
+The rented backends remain measurement scaffolding and cannot be the business:
+B2 costs $6/TB-month and R2 $15/TB-month against a $1.50/TB-month node payout,
+so every rented terabyte loses $4.50 a month. Owned disk is about
+$0.26/TB-month (a 20 TB drive at ~$250 over five years, plus ~6 W of power),
+which is why $1.50 works for an operator and renting never can.
 
 ### Three things it is not
 
