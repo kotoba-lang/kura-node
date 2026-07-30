@@ -218,7 +218,7 @@
                                                                    " — past the code's distance")
                                                                  (when why (str "; first: " why))))
                                                        (aset "cause" (first (vals failures)))))))
-                                          (assoc acc stripe missing))))))))
+                                          (assoc acc stripe failures))))))))
               (js/Promise.resolve {})
               (range (:stripes plan)))
       (.catch (fn [e]
@@ -227,7 +227,18 @@
                     (.then (fn [_] (throw e))))))
       (.then (fn [missing-by-stripe]
                {:object-id (:object-id plan)
-                :missing-shards (into {} (remove (comp empty? val)) missing-by-stripe)
+                :missing-shards (into {} (remove (comp empty? val))
+                                      (update-vals missing-by-stripe #(set (keys %))))
+                ;; WHY each shard is missing, not only which. A degraded write is
+                ;; not an error, so nothing throws and the reasons had nowhere to
+                ;; go — the third time in one session that a cause was discarded
+                ;; and a diagnosis had to start over. A write that quietly
+                ;; tolerates a failure owes the operator the failure.
+                :missing-reasons (into {}
+                                       (comp (remove (comp empty? val))
+                                             (map (fn [[st fs]]
+                                                    [st (update-vals fs #(some-> % (.-message)))])))
+                                       missing-by-stripe)
                 :degraded? (boolean (some seq (vals missing-by-stripe)))
                 :size (:size plan)
                 :stripes (:stripes plan)
