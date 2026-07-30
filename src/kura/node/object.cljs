@@ -289,9 +289,14 @@
                                   (keep-indexed (fn [i s] (when (nil? s) i)) present))
                      erased (into (set (keys unreachable)) absent)]
                  (if (empty? erased)
-                   {:shards present :repaired 0 :unreachable {}}
+                   {:shards present :repaired 0 :unreachable {} :missing #{}}
                    (if-let [r (repair present plan)]
-                     {:shards (:shards r) :repaired (:repaired r) :unreachable unreachable}
+                     ;; `:missing` is what was not in hand — the set repair writes
+                     ;; back. Returned from here rather than recomputed by the
+                     ;; caller so a repair cannot disagree with the read about
+                     ;; which shards were absent, and write the wrong ones.
+                     {:shards (:shards r) :repaired (:repaired r)
+                      :unreachable unreachable :missing erased}
                      (throw (js/Error.
                              (str "stripe " stripe " of " (:object-id plan)
                                   " cannot be reconstructed: " (count absent)
@@ -302,6 +307,28 @@
                                   (when (seq unreachable)
                                     (str ". Unreachable is a transport fact, not data loss — "
                                          "first: " (val (first unreachable))))))))))))))
+
+(defn- read-stripes>
+  "Read every stripe, reconstructing what is not in hand.
+
+  Shared by `get-object>` and `repair-object!>` rather than written twice,
+  because the two must agree about what is missing — a repair that disagrees
+  with the read about which shards are absent writes the wrong ones back."
+  [{:keys [plan] :as ctx}]
+  (reduce (fn [p stripe]
+            (.then p (fn [acc]
+                       (-> (get-stripe> ctx stripe)
+                           (.then (fn [r]
+                                    (-> acc
+                                        (update :parts conj (:shards r))
+                                        (update :missing assoc stripe (:missing r))
+                                        (update :repaired + (:repaired r))
+                                        (update :unreachable + (count (:unreachable r))))))))))
+          (js/Promise.resolve {:parts [] :missing {} :repaired 0 :unreachable 0})
+          (range (:stripes plan))))
+
+(defn- assemble [{:keys [plan]} parts]
+  (gf/concat-shards (mapcat #(subvec % 0 (:k (:layout plan))) parts) (:size plan)))
 
 (defn get-object>
   "Read `(:object-id plan)` back, repairing stripes as needed.
@@ -315,19 +342,9 @@
                "Reading without it is reading without knowing, and a silent "
                "wrong answer from a storage system is the failure mode with no "
                "recovery."))
-  (-> (reduce (fn [p stripe]
-                (.then p (fn [acc]
-                           (-> (get-stripe> ctx stripe)
-                               (.then (fn [r] (-> acc
-                                                  (update :parts conj (:shards r))
-                                                  (update :repaired + (:repaired r))
-                                                  (update :unreachable + (count (:unreachable r))))))))))
-              (js/Promise.resolve {:parts [] :repaired 0 :unreachable 0})
-              (range (:stripes plan)))
+  (-> (read-stripes> ctx)
       (.then (fn [{:keys [parts repaired unreachable]}]
-               (let [k (:k (:layout plan))
-                     bytes (gf/concat-shards (mapcat #(subvec % 0 k) parts)
-                                             (:size plan))
+               (let [bytes (assemble ctx parts)
                      d (digest bytes)]
                  (when-not (= d expect-digest)
                    (throw (js/Error.
@@ -341,3 +358,64 @@
                   ;; because 8 fetches failed", which are different problems with
                   ;; different fixes.
                   :unreachable unreachable})))))
+
+(defn repair-object!>
+  "Rebuild the shards that are not in hand and write them back.
+
+  **Verification comes before the write, and that ordering is the whole
+  function.** The bytes are reassembled and checked against the digest first; a
+  mismatch refuses to repair. Writing back shards derived from an unverified
+  reconstruction would take a problem that is currently *detectable* — one read
+  fails a digest check — and spread it across the fleet as data that decodes
+  cleanly to the wrong answer. There is no recovery from that, because every
+  copy agrees.
+
+  Writes back everything that was not in hand, absent or unreachable alike. A
+  put is idempotent, and the alternative is deciding a shard is fine because the
+  fetch that would have proved it failed. The report separates the two counts so
+  an operator can see how much of the work was caused by real loss and how much
+  by a flaky network — different problems, and only one of them is fixed by
+  buying disks."
+  [{:keys [plan store-for digest expect-digest] :as ctx}]
+  (assert (fn? store-for) "store-for is required")
+  (assert (fn? digest) "digest is required")
+  (assert (and (string? expect-digest) (seq expect-digest))
+          "expect-digest is required — repair without verification is corruption with extra steps")
+  (-> (read-stripes> ctx)
+      (.then (fn [{:keys [parts missing repaired unreachable]}]
+               (let [bytes (assemble ctx parts)
+                     d (digest bytes)]
+                 (when-not (= d expect-digest)
+                   (throw (js/Error.
+                           (str "refusing to repair " (:object-id plan)
+                                ": reconstructed digest " d " does not match the "
+                                "receipt's " expect-digest
+                                ". Writing these shards back would turn a "
+                                "detectable fault into agreement."))))
+                 (-> (reduce
+                      (fn [p [stripe idxs]]
+                        (.then p (fn [acc]
+                                   (if (empty? idxs)
+                                     acc
+                                     (-> (js/Promise.allSettled
+                                          (clj->js
+                                           (map (fn [i]
+                                                  (async/-put-shard!>
+                                                   (store-for stripe i)
+                                                   (manifest/shard-id (:object-id plan) stripe i)
+                                                   (nth (nth parts stripe) i)))
+                                                idxs)))
+                                         (.then (fn [rs]
+                                                  (let [bad (count (filterv #(= "rejected" (.-status ^js %))
+                                                                            (vec rs)))]
+                                                    (-> acc
+                                                        (update :rewritten + (- (count idxs) bad))
+                                                        (update :still-failing + bad)))))))))) 
+                      (js/Promise.resolve {:rewritten 0 :still-failing 0})
+                      missing)
+                     (.then (fn [w]
+                              (merge w {:object-id (:object-id plan)
+                                        :was-missing (reduce + 0 (map count (vals missing)))
+                                        :repaired-in-memory repaired
+                                        :unreachable-on-read unreachable
+                                        :verified? true})))))))))
