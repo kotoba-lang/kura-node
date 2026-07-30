@@ -130,6 +130,25 @@
   [shards len]
   (reduce xor-into! (alloc len) shards))
 
+(defn concat-shards
+  "One buffer of `size` bytes from `shards` in order, truncating the tail.
+
+  Truncation is the point rather than an edge case. A stripe is padded up to a
+  multiple of k so that no shard is ragged (`kura.manifest/plan` explains why),
+  so the last stripe of almost every object carries zeros that were never part
+  of the object. `size` is what makes that padding invisible, and it has to be
+  applied here — the layer that reassembles — because nothing below this knows
+  how long the object was."
+  [shards size]
+  (let [out (alloc size)]
+    (loop [ss (seq shards) at 0]
+      (if (or (nil? ss) (>= at size))
+        out
+        (let [s (first ss)
+              n (min (blength s) (- size at))]
+          (dotimes [i n] (bset! out (+ at i) (bget s i)))
+          (recur (next ss) (+ at (blength s))))))))
+
 ;; --- the linear combination the codec needs --------------------------------
 
 (defn apply-row
