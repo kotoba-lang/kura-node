@@ -265,12 +265,26 @@
   scheduler to rebuild shards that are sitting there intact. So both are erasures
   for the purposes of decoding — the bytes are equally not in hand — and the
   error, if it comes to one, says which is which."
-  [{:keys [plan store-for]} stripe]
-  (-> (js/Promise.allSettled
-       (clj->js (map (fn [i]
-                       (async/-get-shard> (store-for stripe i)
-                                          (manifest/shard-id (:object-id plan) stripe i)))
-                     (range (:n (:layout plan))))))
+  [{:keys [plan store-for max-inflight] :as _ctx} stripe]
+  ;; Bounded, for the same reason writes are. Reads were left firing all n at
+  ;; once after the write path was fixed to batch — an asymmetry with no
+  ;; justification, and it cost a verification run: five objects reported
+  ;; `0 shard(s) absent and 24 unreachable`, every failure a GET against
+  ;; localhost. The bytes were all there. Unbounded concurrency was the only
+  ;; thing wrong, and the fix for it had already been written for the other
+  ;; direction.
+  (-> (reduce (fn [p batch]
+                (.then p (fn [acc]
+                           (-> (js/Promise.allSettled
+                                (clj->js (map (fn [i]
+                                                (async/-get-shard>
+                                                 (store-for stripe i)
+                                                 (manifest/shard-id (:object-id plan) stripe i)))
+                                              batch)))
+                               (.then (fn [rs] (into acc (vec rs))))))))
+              (js/Promise.resolve [])
+              (partition-all (or max-inflight default-max-inflight)
+                             (range (:n (:layout plan)))))
       (.then (fn [rs]
                (let [results (vec rs)
                      shard-of (fn [i]
