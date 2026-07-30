@@ -77,20 +77,31 @@
   is the one that silently voids the durability argument."
   #{:independent :shared-provider :shared-substrate})
 
+(def availabilities
+  "Whether a node stays awake. Mirrors `kura.placement/availabilities`, and is
+  declared here because the descriptor is what a coordinator reads — a node
+  that cannot say it sleeps will be probed as though it should not."
+  #{:always-on :intermittent})
+
 (defn descriptor
   "Build and validate a node descriptor."
-  [{:keys [node-id failure-domain independence] caps :capabilities
+  [{:keys [node-id failure-domain independence availability] caps :capabilities
     :or {caps #{}}}]
   (assert (and (string? node-id) (seq node-id)) "node-id is required")
   (assert (contains? independence-profiles independence)
           (str "independence must be one of " independence-profiles))
   (assert (and (map? failure-domain) (seq failure-domain))
           "failure-domain is required, e.g. {:provider \"b2\" :account \"x\"}")
+  (assert (contains? availabilities availability)
+          (str "availability must be one of " availabilities ", got "
+               (pr-str availability) ". A probe that cannot tell a sleeping "
+               "node from a broken one records the wrong fact about both."))
   (assert (every? #(contains? capabilities %) caps)
           (str "unknown capability in " caps))
   {:node-id node-id
    :failure-domain failure-domain
    :independence independence
+   :availability availability
    :capabilities (set caps)})
 
 (defn store? [x]
@@ -140,17 +151,40 @@
   measurement, not that the measurement is forbidden."
   [descriptors tolerated]
   (let [{n-domains :count domains :domains} (effective-domains descriptors)
-        worst (if (seq domains) (apply max (map #(count (val %)) domains)) 0)]
+        worst (if (seq domains) (apply max (map #(count (val %)) domains)) 0)
+        awake (filterv #(= :always-on (:availability %)) descriptors)
+        {awake-domains :count} (effective-domains awake)]
     {:backends (count descriptors)
      :effective-domains n-domains
      :largest-domain worst
      :tolerated tolerated
      :survivable? (<= worst tolerated)
+     ;; Reported separately because the domains that count for *reading right
+     ;; now* are the ones that are awake. A fleet can have four independent
+     ;; domains and two of them in somebody's bag, and the number that decides
+     ;; whether a read succeeds tonight is this one.
+     :always-on-backends (count awake)
+     :always-on-domains awake-domains
+     :intermittent-backends (- (count descriptors) (count awake))
      :note (cond
              (zero? (count descriptors)) "no backends"
-             (<= worst tolerated) "every domain is inside the code's tolerance"
-             :else (str "one domain holds " worst " shards but the code tolerates "
-                        tolerated " — durability is that domain's, not the code's"))
+             (> worst tolerated)
+             (str "one domain holds " worst " shards but the code tolerates "
+                  tolerated " — durability is that domain's, not the code's")
+             ;; Checked before the all-clear, because the all-clear is about
+             ;; surviving a domain loss and this is about whether a read works
+             ;; tonight. Passing the first and failing the second is exactly the
+             ;; state a fleet with consumer nodes sits in, and reporting only
+             ;; the first would call it healthy.
+             (zero? awake-domains)
+             (str "every backend is intermittent: the shards may all be intact "
+                  "and none of them reachable while the machines sleep. This is "
+                  "an availability floor of zero, which no code can fix")
+             (< awake-domains n-domains)
+             (str awake-domains " of " n-domains " domains stay awake — the rest "
+                  "are intermittent and a read that needs them waits for a lid "
+                  "to open. Durability is fine; reachability is the smaller number")
+             :else "every domain is inside the code's tolerance and stays awake")
      :domains domains}))
 
 ;; --- shard ids -------------------------------------------------------------

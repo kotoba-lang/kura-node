@@ -3,7 +3,7 @@
 
       nbb --classpath \"src:script:...\" script/run_node.cljs \\
         --root ~/kura-data --port 8080 --node-id my-node \\
-        --operator alice --site home
+        --operator alice --site home --availability intermittent
 
   `kura.node.fs` made a self-hosted node *possible*; this makes it a command.
   The distance between those two is the whole reason the fleet is still short a
@@ -25,7 +25,9 @@
     failure this whole project keeps trying not to ship.
   - *No public address.* Binding a port is not being reachable. A node behind
     NAT needs a tunnel or a forwarded port; the coordinator cannot probe what
-    it cannot reach, and an unreachable node reads as a dead one.
+    it cannot reach. Whether that unreachability reads as a fault depends on
+    `--availability`: an `intermittent` node is *expected* to go quiet, and the
+    fleet caps how much of an object may depend on it precisely so that it can.
   - *No redundancy of its own.* One disk, no RAID. That is fine — absorbing a
     lost shard is what the erasure code is for — but the operator should know
     that is the arrangement rather than assume the network protects their disk."
@@ -121,7 +123,8 @@
         port (js/parseInt (arg "--port" "8080"))
         node-id (arg "--node-id" "self-hosted-1")
         operator (arg "--operator" nil)
-        site (arg "--site" nil)]
+        site (arg "--site" nil)
+        availability (keyword (arg "--availability" nil))]
     (assert root "--root is required (a directory this node may write to)")
     (assert operator
             (str "--operator is required. It is not decoration: the audit reads "
@@ -137,6 +140,19 @@
                  "domain and inflates the fleet's durability by however many "
                  "boxes are in the room. Use somewhere you could lose all at "
                  "once: \"tokyo-office\", \"home\", \"osaka-colo\"."))
+    (assert (contains? store/availabilities availability)
+            (str "--availability is required and must be always-on or "
+                 "intermittent. This is not a service tier, it is a fact about "
+                 "the machine, and the fleet needs it to decide two different "
+                 "things: how many shards may sit here (placement caps sleeping "
+                 "nodes so every object stays readable from always-on nodes "
+                 "alone), and whether an unanswered probe is a fault or a "
+                 "closed lid. Declaring intermittent costs you nothing — it "
+                 "means fewer shards land here and you are NOT penalised for "
+                 "sleeping. Claiming always-on and then sleeping is the case "
+                 "that gets penalised, so a laptop should say intermittent. "
+                 "A machine that stays powered and reachable — a server, a mini "
+                 "on a shelf — says always-on."))
     ;; The refusal promised in the namespace docstring, as an assertion rather
     ;; than a TODO.
     (assert (not (flag? "--accept-customer-data"))
@@ -146,7 +162,8 @@
     (let [s (fs/open {:node-id node-id
                       :root root
                       :failure-domain {:operator operator :site site}
-                      :independence :independent})]
+                      :independence :independent
+                      :availability availability})]
       (-> (.createServer http (fn [req res] (handle> s req res)))
           (.listen port
                    (fn []

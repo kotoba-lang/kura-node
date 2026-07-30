@@ -98,4 +98,8 @@
     {:node-id node-id
      :failure-domain failure-domain
      :independence independence
+     ;; Baked in because an R2 binding can only be Cloudflare, and staying
+     ;; reachable is the product being paid for. Unlike S3 below, there is no
+     ;; self-hosted case that speaks this interface.
+     :availability :always-on
      :capabilities #{:range-read :list :delete :size-without-read :durable-put}})))

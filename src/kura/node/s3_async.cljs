@@ -132,7 +132,7 @@
   `:independence` and `:failure-domain` are required and have no default —
   and here they carry the weight, because this is the namespace that exists to
   put shards somewhere the other provider's outage does not reach."
-  [{:keys [node-id independence failure-domain endpoint host bucket region
+  [{:keys [node-id independence availability failure-domain endpoint host bucket region
            key-id secret prefix http crypto now-fn service]
     :or {prefix "kura" region "us-east-1" service "s3"}}]
   (assert (and http crypto) "http and crypto must be injected")
@@ -146,4 +146,9 @@
     {:node-id node-id
      :failure-domain failure-domain
      :independence independence
+     ;; NOT baked in. S3 is a protocol, not a provider: B2 and AWS are
+     ;; always-on because that is what the bill buys, but MinIO on somebody's
+     ;; laptop speaks the same interface and is not. Assuming the rented case
+     ;; would silently promise reachability for the self-hosted one.
+     :availability availability
      :capabilities #{:range-read :list :delete :size-without-read :durable-put}})))

@@ -34,6 +34,7 @@
 (defn- descs [independence n domain-fn]
   (mapv #(store/descriptor {:node-id (str "n-" %)
                             :independence independence
+                            :availability :always-on
                             :failure-domain (domain-fn %)})
         (range n)))
 
@@ -59,7 +60,7 @@
   (let [providers ["b2" "r2" "s3" "storj"]
         fleet (mapv #(store/descriptor
                       {:node-id (str "n-" %)
-                       :independence :shared-provider
+                       :independence :shared-provider :availability :always-on
                        :failure-domain {:provider (nth providers (mod % 4))}})
                     (range 26))
         a (store/audit fleet 7)]
@@ -81,7 +82,7 @@
             could be satisfied by renaming — found by this repo's own
             local-node demo reporting 13 domains for a three-machine fleet."
     (let [one-box (mapv #(store/descriptor {:node-id (str "fs-" %)
-                                            :independence :independent
+                                            :independence :independent :availability :always-on
                                             :failure-domain {:operator "alice" :site "home"}})
                         (range 11))
           a (store/audit one-box 13)]
@@ -89,11 +90,11 @@
       (is (= 11 (:largest-domain a))))
     (testing "and two machines in different places are two"
       (let [two (into (mapv #(store/descriptor {:node-id (str "a-" %)
-                                                :independence :independent
+                                                :independence :independent :availability :always-on
                                                 :failure-domain {:operator "alice" :site "home"}})
                             (range 5))
                       (mapv #(store/descriptor {:node-id (str "b-" %)
-                                                :independence :independent
+                                                :independence :independent :availability :always-on
                                                 :failure-domain {:operator "bob" :site "office"}})
                             (range 5)))]
         (is (= 2 (:effective-domains (store/audit two 13))))))))
@@ -103,3 +104,60 @@
     (is (= 0 (:backends a)))
     (is (= 0 (:largest-domain a)))
     (is (= "no backends" (:note a)))))
+
+;; --- availability in the audit ---------------------------------------------
+
+(defn- mixed-fleet
+  "Backends at genuinely separate sites, `awake` of them always-on."
+  [n awake]
+  (mapv #(store/descriptor {:node-id (str "n-" %)
+                            :independence :independent
+                            :availability (if (< % awake) :always-on :intermittent)
+                            :failure-domain {:operator "junkawasaki"
+                                             :site (str "site-" %)}})
+        (range n)))
+
+(deftest availability-must-be-declared-by-a-backend
+  (testing "a probe that cannot tell a sleeping node from a broken one records
+            the wrong fact about both"
+    (is (thrown? #?(:clj AssertionError :cljs js/Error)
+                 (store/descriptor {:node-id "n" :independence :independent
+                                    :failure-domain {:provider "b2"}})))))
+
+(deftest the-audit-reports-awake-domains-separately
+  (testing "four independent domains, two of them in somebody's bag: durability
+            is four and reachability is two, and only reporting the first would
+            call this healthy"
+    (let [a (store/audit (mixed-fleet 4 2) 7)]
+      (is (= 4 (:effective-domains a)))
+      (is (= 2 (:always-on-domains a)))
+      (is (= 2 (:intermittent-backends a)))
+      (is (:survivable? a) "the code's tolerance is still satisfied")
+      (is (re-find #"reachability is the smaller number" (:note a)))))
+  (testing "an all-awake fleet says so plainly"
+    (let [a (store/audit (mixed-fleet 4 4) 7)]
+      (is (= 4 (:always-on-domains a)))
+      (is (zero? (:intermittent-backends a)))
+      (is (re-find #"stays awake" (:note a)))))
+  (testing "an all-intermittent fleet is an availability floor of zero, which is
+            reported ahead of the all-clear because no code can fix it"
+    (let [a (store/audit (mixed-fleet 4 0) 7)]
+      (is (zero? (:always-on-domains a)))
+      (is (:survivable? a) "every shard may be perfectly intact")
+      (is (re-find #"availability floor of zero" (:note a))
+          "and yet unreadable while the machines sleep")))
+  (testing "a domain over tolerance still outranks the availability note —
+            losing data beats being slow to answer. Twenty sleeping laptops in
+            ONE room, which is both problems at once and must report the worse."
+    (let [one-room (mapv #(store/descriptor
+                           {:node-id (str "lap-" %)
+                            :independence :independent
+                            :availability :intermittent
+                            :failure-domain {:operator "junkawasaki"
+                                             :site "fleet-site-1"}})
+                         (range 20))
+          a (store/audit one-room 7)]
+      (is (= 1 (:effective-domains a)) "one room is one domain, 20 boxes or not")
+      (is (= 20 (:largest-domain a)))
+      (is (false? (:survivable? a)))
+      (is (re-find #"durability is that domain's" (:note a))))))
