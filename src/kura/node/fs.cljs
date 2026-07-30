@@ -87,7 +87,19 @@
                    (->> entries
                         (filter #(.isFile ^js %))
                         (map (fn [e]
-                               (-> (path/join (.-parentPath ^js e) (.-name ^js e))
+                               ;; `parentPath` is Node >= 20.12/21.4; before
+                               ;; that the same value is `path`, which is now
+                               ;; the deprecated alias. Reading only the new
+                               ;; name yields undefined on Node 18 and throws
+                               ;; from path/join with a message about the
+                               ;; argument rather than about the version —
+                               ;; found by running this node on Ubuntu/Node
+                               ;; 18.19, where the contract suite stopped at
+                               ;; case 14 of 19. The newer name is tried first
+                               ;; so the deprecated one is only a fallback.
+                               (-> (path/join (or (.-parentPath ^js e)
+                                                  (.-path ^js e))
+                                              (.-name ^js e))
                                    (str/replace (str base "/") ""))))
                         ;; The temp files a crashed write leaves behind are not
                         ;; shards and must never appear in an audit tree.
