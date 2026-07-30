@@ -114,6 +114,44 @@
                                  (if (re-find #"digest mismatch" (.-message e))
                                    (ok! "a wrong digest is refused, though the stripes decoded fine")
                                    (fail! (str "wrong error: " (.-message e))))))))))
+        (.then (fn [_]
+                 ;; A failed write must leave nothing behind. Half an object has
+                 ;; no receipt so nothing will ever read it, and it is
+                 ;; indistinguishable from a complete one to anything counting
+                 ;; shards. One store is made to throw on put, partway through
+                 ;; the shard set.
+                 (let [size (* 16 1024)
+                       bytes (gf/->bytes (mapv #(mod % 256) (range size)))
+                       plan (manifest/plan {:object-id "obj-halfwritten" :size size
+                                            :stripe-bytes (* 16 1024)} layout)
+                       broken (reify
+                                async/IAsyncShardStore
+                                (-put-shard!> [_ _ _] (js/Promise.reject (js/Error. "disk on fire")))
+                                (-get-shard> [_ _] (js/Promise.resolve nil))
+                                (-get-range> [_ _ _ _] (js/Promise.resolve nil))
+                                (-delete-shard!> [_ _] (js/Promise.resolve false))
+                                (-list-shards> [_ _] (js/Promise.resolve []))
+                                (-shard-size> [_ _] (js/Promise.resolve nil)))
+                       ;; The LAST shard index fails, so 0..n-2 are written
+                       ;; first and there is something to clean up. Derived from
+                       ;; the layout rather than typed: writing 31 here for an
+                       ;; n=26 code meant the broken store was never reached and
+                       ;; the test passed a successful write off as a failure.
+                       last-i (dec (:n layout))
+                       store-for (fn [_s i] (if (= i last-i) broken (nth stores (mod i 4))))]
+                   (-> (obj/put-object!> {:plan plan :store-for store-for
+                                          :digest object-check/digest :bytes bytes})
+                       (.then (fn [_] (fail! "a broken store should have thrown")))
+                       (.catch (fn [e]
+                                 (if (re-find #"disk on fire" (.-message e))
+                                   (ok! "the write error propagates, not a cleanup error")
+                                   (fail! (str "wrong error: " (.-message e))))))
+                       (.then (fn [_]
+                                (async/-list-shards> (nth stores 0) "obj-halfwritten")))
+                       (.then (fn [left]
+                                (if (zero? (count left))
+                                  (ok! "a failed write left no shards behind")
+                                  (fail! (str (count left) " orphan shards remain")))))))))
         (.then (fn [_] (fsp/rm root #js {:recursive true :force true})))
         (.catch (fn [e] (fail! (str "threw: " (.-message e))))))))
 
