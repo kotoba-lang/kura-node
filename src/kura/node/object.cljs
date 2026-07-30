@@ -129,14 +129,26 @@
                                            (manifest/shard-id (:object-id plan) stripe i)
                                            shard))
                      indexed)))
-      (.then (fn [rs] (filterv #(= "rejected" (.-status ^js %)) (vec rs))))))
+      (.then (fn [rs]
+               ;; index -> reason, not just the index set. The count tells the
+               ;; caller whether the object is readable; the reason tells whoever
+               ;; is debugging WHY a backend refused, and losing it costs hours —
+               ;; `fetch failed` with the cause discarded sent this ingest down
+               ;; two wrong diagnoses before the third one measured it.
+               (into {}
+                     (keep-indexed (fn [j r]
+                                     (when (= "rejected" (.-status ^js r))
+                                       [(first (nth (vec indexed) j))
+                                        (.-reason ^js r)])))
+                     (vec rs))))))
 
 (defn- put-stripe!>
-  "Write all n shards of one stripe, in bounded batches.
+  "Write all n shards of one stripe in bounded batches, and report which failed.
 
-  Stops at the first batch with a failure: everything attempted has settled, and
-  everything not attempted was never written, so the caller's cleanup covers
-  both. Continuing would only write more shards that are about to be deleted."
+  Every batch is attempted even after one fails, because the caller's decision
+  is about the erasure pattern of what is MISSING and it cannot make that
+  decision from a partial picture. Returns the set of shard indices that did not
+  land."
   [{:keys [plan max-inflight] :as ctx} stripe bytes]
   (let [offset (* stripe (:stripe-bytes plan))
         all (encode (data-shards bytes offset plan) plan)
@@ -144,10 +156,9 @@
                                (map-indexed vector all))]
     (reduce (fn [p batch]
               (.then p (fn [failed]
-                         (if (seq failed)
-                           failed
-                           (put-batch!> ctx stripe batch)))))
-            (js/Promise.resolve [])
+                         (-> (put-batch!> ctx stripe batch)
+                             (.then (fn [more] (merge failed more)))))))
+            (js/Promise.resolve {})
             batches)))
 
 (defn delete-object!>
@@ -169,40 +180,55 @@
   `(fn [bytes] string)` — required, because the receipt it produces is the only
   thing that makes a later read checkable.
 
-  **A failed write cleans up after itself.** Half an object on the fleet is
-  worse than none: there is no receipt for it, so nothing will ever read it, and
-  it is indistinguishable from a complete object to anything counting shards —
-  it costs storage, inflates an audit, and survives every garbage collector that
-  works from the object list. Found the hard way: a first real ingest lost 26
-  objects to transient transport failures and left their shards behind, and the
-  shards looked exactly like the 42 that had succeeded.
+  **A write succeeds when the object is readable, not when every shard lands.**
+  Requiring all n makes a write exactly as fragile as the least reliable backend
+  in the fleet, which is the opposite of what an erasure code is for: one flaky
+  provider then fails objects that the code could have absorbed without noticing.
+  Measured, not theorised — B2 closes its keep-alive socket after about sixteen
+  PUTs and a fresh connection failed the same way, so with all-or-nothing every
+  multi-megabyte object failed while the code could tolerate 13 of 32 losses.
 
-  Cleanup is best-effort and the original error is what propagates. A cleanup
-  that failed must not mask the write that failed, and the caller can only act
-  on the latter."
-  [{:keys [plan store-for digest bytes] :as ctx}]
+  So the test is the erasure pattern: if `erasure`'s recovery plan can rebuild
+  what is missing, the object is stored and **the receipt says which shards are
+  absent** so repair can fill them in. If it cannot, the write fails and cleans
+  up. `:allow-degraded` must be passed to opt into this — the default fails
+  closed, because a caller that did not ask to trade redundancy for availability
+  should not silently get that trade."
+  [{:keys [plan store-for digest bytes allow-degraded] :as ctx}]
   (assert (fn? store-for) "store-for is required: (fn [stripe index] store)")
   (assert (fn? digest)
           (str "digest is required. Without it a read cannot verify what it "
                "reconstructed, and erasure decoding fails silently — the "
                "algebra solves whatever system it is handed."))
   (-> (reduce (fn [p stripe]
-                (.then p (fn [_]
+                (.then p (fn [acc]
                            (-> (put-stripe!> ctx stripe bytes)
-                               (.then (fn [failed]
-                                        (when (seq failed)
-                                          (throw (or (.-reason ^js (first failed))
-                                                     (js/Error. (str (count failed)
-                                                                     " shard write(s) failed in stripe "
-                                                                     stripe)))))))))))
-              (js/Promise.resolve nil)
+                               (.then (fn [failures]
+                                        (let [missing (set (keys failures))
+                                              rec (lrc/recovery-plan (:layout plan) missing)]
+                                          (when-not (and (:recoverable? rec)
+                                                         (or allow-degraded (empty? missing)))
+                                            (let [why (some-> (first (vals failures)) (.-message))]
+                                              (throw (doto (js/Error.
+                                                            (str (count missing) " of "
+                                                                 (:n (:layout plan))
+                                                                 " shards failed in stripe " stripe
+                                                                 (if (:recoverable? rec)
+                                                                   " — recoverable, but :allow-degraded was not set"
+                                                                   " — past the code's distance")
+                                                                 (when why (str "; first: " why))))
+                                                       (aset "cause" (first (vals failures)))))))
+                                          (assoc acc stripe missing))))))))
+              (js/Promise.resolve {})
               (range (:stripes plan)))
       (.catch (fn [e]
                 (-> (delete-object!> ctx)
                     (.catch (fn [_] nil))
                     (.then (fn [_] (throw e))))))
-      (.then (fn [_]
+      (.then (fn [missing-by-stripe]
                {:object-id (:object-id plan)
+                :missing-shards (into {} (remove (comp empty? val)) missing-by-stripe)
+                :degraded? (boolean (some seq (vals missing-by-stripe)))
                 :size (:size plan)
                 :stripes (:stripes plan)
                 :shards-written (* (:stripes plan) (:n (:layout plan)))

@@ -143,8 +143,14 @@
                                           :digest object-check/digest :bytes bytes})
                        (.then (fn [_] (fail! "a broken store should have thrown")))
                        (.catch (fn [e]
-                                 (if (re-find #"disk on fire" (.-message e))
-                                   (ok! "the write error propagates, not a cleanup error")
+                                 ;; The aggregate says how many failed and
+                                 ;; whether it was recoverable — what the caller
+                                 ;; decides on. The underlying reason has to
+                                 ;; survive too, or debugging starts from "a
+                                 ;; write failed" and nothing else.
+                                 (if (and (re-find #"1 of 26 shards failed" (.-message e))
+                                          (re-find #"disk on fire" (.-message e)))
+                                   (ok! "the failure names both the count and the underlying reason")
                                    (fail! (str "wrong error: " (.-message e))))))
                        (.then (fn [_]
                                 (async/-list-shards> (nth stores 0) "obj-halfwritten")))
