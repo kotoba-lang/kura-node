@@ -98,23 +98,65 @@
 
 ;; --- the operation ---------------------------------------------------------
 
-(defn- put-stripe!> [{:keys [plan store-for]} stripe bytes]
+(defn- put-stripe!>
+  "Write all n shards of one stripe, and **wait for every one to settle** before
+  reporting failure.
+
+  `Promise.all` would be the obvious choice and is wrong here: it rejects on the
+  first failure while the other writes are still in flight, so a caller that
+  cleans up on failure deletes the shards that have landed and then the
+  stragglers land *after* the cleanup. That leaves exactly the orphans the
+  cleanup existed to prevent, and it leaves them non-deterministically, which is
+  the worst way to have a bug. Found by a test that asserted the cleanup left
+  nothing and kept finding seven shards."
+  [{:keys [plan store-for]} stripe bytes]
   (let [offset (* stripe (:stripe-bytes plan))
         all (encode (data-shards bytes offset plan) plan)]
-    (js/Promise.all
-     (clj->js (map-indexed
-               (fn [i shard]
-                 (async/-put-shard!> (store-for stripe i)
-                                     (manifest/shard-id (:object-id plan) stripe i)
-                                     shard))
-               all)))))
+    (-> (js/Promise.allSettled
+         (clj->js (map-indexed
+                   (fn [i shard]
+                     (async/-put-shard!> (store-for stripe i)
+                                         (manifest/shard-id (:object-id plan) stripe i)
+                                         shard))
+                   all)))
+        (.then (fn [results]
+                 (let [bad (filterv #(= "rejected" (.-status ^js %)) (vec results))]
+                   (when (seq bad)
+                     (throw (or (.-reason ^js (first bad))
+                                (js/Error. (str (count bad) " shard write(s) failed in stripe "
+                                                stripe)))))
+                   results))))))
+
+(defn delete-object!>
+  "Remove every shard of `(:object-id plan)`. Tolerant of absence, because the
+  reason to call this is usually that the write did not finish."
+  [{:keys [plan store-for]}]
+  (js/Promise.all
+   (clj->js
+    (for [stripe (range (:stripes plan))
+          i (range (:n (:layout plan)))]
+      (-> (async/-delete-shard!> (store-for stripe i)
+                                 (manifest/shard-id (:object-id plan) stripe i))
+          (.catch (fn [_] false)))))))
 
 (defn put-object!>
   "Write `bytes` as `(:object-id plan)` across the fleet.
 
   `store-for` is `(fn [stripe shard-index] store)`. `digest` is
   `(fn [bytes] string)` — required, because the receipt it produces is the only
-  thing that makes a later read checkable."
+  thing that makes a later read checkable.
+
+  **A failed write cleans up after itself.** Half an object on the fleet is
+  worse than none: there is no receipt for it, so nothing will ever read it, and
+  it is indistinguishable from a complete object to anything counting shards —
+  it costs storage, inflates an audit, and survives every garbage collector that
+  works from the object list. Found the hard way: a first real ingest lost 26
+  objects to transient transport failures and left their shards behind, and the
+  shards looked exactly like the 42 that had succeeded.
+
+  Cleanup is best-effort and the original error is what propagates. A cleanup
+  that failed must not mask the write that failed, and the caller can only act
+  on the latter."
   [{:keys [plan store-for digest bytes] :as ctx}]
   (assert (fn? store-for) "store-for is required: (fn [stripe index] store)")
   (assert (fn? digest)
@@ -124,6 +166,10 @@
   (-> (reduce (fn [p stripe] (.then p (fn [_] (put-stripe!> ctx stripe bytes))))
               (js/Promise.resolve nil)
               (range (:stripes plan)))
+      (.catch (fn [e]
+                (-> (delete-object!> ctx)
+                    (.catch (fn [_] nil))
+                    (.then (fn [_] (throw e))))))
       (.then (fn [_]
                {:object-id (:object-id plan)
                 :size (:size plan)
