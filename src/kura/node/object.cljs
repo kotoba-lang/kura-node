@@ -98,34 +98,57 @@
 
 ;; --- the operation ---------------------------------------------------------
 
-(defn- put-stripe!>
-  "Write all n shards of one stripe, and **wait for every one to settle** before
-  reporting failure.
+(def default-max-inflight
+  "How many shard writes are in flight at once, by default.
 
-  `Promise.all` would be the obvious choice and is wrong here: it rejects on the
-  first failure while the other writes are still in flight, so a caller that
-  cleans up on failure deletes the shards that have landed and then the
-  stragglers land *after* the cleanup. That leaves exactly the orphans the
-  cleanup existed to prevent, and it leaves them non-deterministically, which is
-  the worst way to have a bug. Found by a test that asserted the cleanup left
-  nothing and kept finding seven shards."
-  [{:keys [plan store-for]} stripe bytes]
+  Not n. Firing all 32 writes of a stripe simultaneously is what an unloaded
+  test tolerates and a real fleet does not: the first ingest of real data failed
+  every multi-megabyte object with `fetch failed`, while the same source read
+  succeeded on its own. The reads were innocent — 32-way concurrency against
+  remote backends was exhausting something (sockets, or a provider's per-client
+  limit), and no amount of retrying fixes a load level that is itself the
+  problem.
+
+  8 because that is one domain's share of a 32-shard stripe under an even
+  spread, so a batch touches every backend once rather than hammering one."
+  8)
+
+(defn- put-batch!>
+  "Write one batch and wait for every write in it to settle.
+
+  allSettled rather than Promise.all, and the distinction is load-bearing:
+  Promise.all rejects on the first failure while its siblings are still in
+  flight, so a caller that cleans up on failure deletes what has landed and the
+  stragglers land AFTER the cleanup — leaving exactly the orphans the cleanup
+  existed to prevent, non-deterministically. Found by a test that asserted the
+  cleanup left nothing and kept finding seven shards."
+  [{:keys [plan store-for]} stripe indexed]
+  (-> (js/Promise.allSettled
+       (clj->js (map (fn [[i shard]]
+                       (async/-put-shard!> (store-for stripe i)
+                                           (manifest/shard-id (:object-id plan) stripe i)
+                                           shard))
+                     indexed)))
+      (.then (fn [rs] (filterv #(= "rejected" (.-status ^js %)) (vec rs))))))
+
+(defn- put-stripe!>
+  "Write all n shards of one stripe, in bounded batches.
+
+  Stops at the first batch with a failure: everything attempted has settled, and
+  everything not attempted was never written, so the caller's cleanup covers
+  both. Continuing would only write more shards that are about to be deleted."
+  [{:keys [plan max-inflight] :as ctx} stripe bytes]
   (let [offset (* stripe (:stripe-bytes plan))
-        all (encode (data-shards bytes offset plan) plan)]
-    (-> (js/Promise.allSettled
-         (clj->js (map-indexed
-                   (fn [i shard]
-                     (async/-put-shard!> (store-for stripe i)
-                                         (manifest/shard-id (:object-id plan) stripe i)
-                                         shard))
-                   all)))
-        (.then (fn [results]
-                 (let [bad (filterv #(= "rejected" (.-status ^js %)) (vec results))]
-                   (when (seq bad)
-                     (throw (or (.-reason ^js (first bad))
-                                (js/Error. (str (count bad) " shard write(s) failed in stripe "
-                                                stripe)))))
-                   results))))))
+        all (encode (data-shards bytes offset plan) plan)
+        batches (partition-all (or max-inflight default-max-inflight)
+                               (map-indexed vector all))]
+    (reduce (fn [p batch]
+              (.then p (fn [failed]
+                         (if (seq failed)
+                           failed
+                           (put-batch!> ctx stripe batch)))))
+            (js/Promise.resolve [])
+            batches)))
 
 (defn delete-object!>
   "Remove every shard of `(:object-id plan)`. Tolerant of absence, because the
@@ -163,7 +186,15 @@
           (str "digest is required. Without it a read cannot verify what it "
                "reconstructed, and erasure decoding fails silently — the "
                "algebra solves whatever system it is handed."))
-  (-> (reduce (fn [p stripe] (.then p (fn [_] (put-stripe!> ctx stripe bytes))))
+  (-> (reduce (fn [p stripe]
+                (.then p (fn [_]
+                           (-> (put-stripe!> ctx stripe bytes)
+                               (.then (fn [failed]
+                                        (when (seq failed)
+                                          (throw (or (.-reason ^js (first failed))
+                                                     (js/Error. (str (count failed)
+                                                                     " shard write(s) failed in stripe "
+                                                                     stripe)))))))))))
               (js/Promise.resolve nil)
               (range (:stripes plan)))
       (.catch (fn [e]
