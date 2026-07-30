@@ -44,14 +44,14 @@
 (defn- fail! [op shard-id {:keys [status]}]
   (throw (js/Error. (str op " failed for " shard-id ": HTTP " status))))
 
-(defrecord HttpNodeStore [http base desc]
+(defrecord HttpNodeStore [http base desc extra-headers]
   async/IAsyncShardStore
   (-put-shard!> [_ shard-id bytes]
     (if-not (store/valid-shard-id? shard-id)
       (js/Promise.reject (js/Error. (str "bad shard id: " shard-id)))
       (-> (s3/-request http {:method :put
                              :url (shard-url base shard-id)
-                             :headers {"content-type" "application/octet-stream"}
+                             :headers (merge {"content-type" "application/octet-stream"} extra-headers)
                              :body bytes})
           (.then (fn [r]
                    (if (ok? r)
@@ -63,7 +63,7 @@
 
   (-get-shard> [_ shard-id]
     (-> (s3/-request http {:method :get :url (shard-url base shard-id)
-                           :headers {} :body (js/Uint8Array. 0)})
+                           :headers extra-headers :body (js/Uint8Array. 0)})
         (.then (fn [r] (cond (ok? r) (:body r)
                              (absent? r) nil
                              :else (fail! "get" shard-id r))))))
@@ -72,14 +72,14 @@
     (-> (s3/-request http {:method :get
                            :url (str (shard-url base shard-id)
                                      "?range=" offset "," length)
-                           :headers {} :body (js/Uint8Array. 0)})
+                           :headers extra-headers :body (js/Uint8Array. 0)})
         (.then (fn [r] (cond (ok? r) (:body r)
                              (absent? r) nil
                              :else (fail! "range" shard-id r))))))
 
   (-delete-shard!> [_ shard-id]
     (-> (s3/-request http {:method :delete :url (shard-url base shard-id)
-                           :headers {} :body (js/Uint8Array. 0)})
+                           :headers extra-headers :body (js/Uint8Array. 0)})
         (.then (fn [r] (cond (ok? r) (boolean (:removed (json-body r)))
                              (absent? r) false
                              :else (fail! "delete" shard-id r))))))
@@ -88,7 +88,7 @@
     (-> (s3/-request http {:method :get
                            :url (str base "/shards?prefix="
                                      (js/encodeURIComponent (or prefix "")))
-                           :headers {} :body (js/Uint8Array. 0)})
+                           :headers extra-headers :body (js/Uint8Array. 0)})
         (.then (fn [r]
                  (if (ok? r)
                    (vec (sort (:shards (json-body r))))
@@ -100,7 +100,7 @@
     ;; and defeat the point — an audit asks for size across every shard it
     ;; holds, and doing that by download is the I/O the design exists to avoid.
     (-> (s3/-request http {:method :head :url (shard-url base shard-id)
-                           :headers {} :body (js/Uint8Array. 0)})
+                           :headers extra-headers :body (js/Uint8Array. 0)})
         (.then (fn [r]
                  (cond (absent? r) nil
                        (ok? r) (let [n (get-in r [:headers "content-length"])]
@@ -116,12 +116,17 @@
   `:descriptor` is the node's own, normally fetched from `/descriptor` — see
   `descriptor>`. It is passed in rather than fetched here so that constructing
   a store does no I/O, which is what lets placement build one per backend
-  without a round trip each."
-  [{:keys [http base descriptor]}]
+  without a round trip each.
+
+  `:headers` is merged into every request. A node on a tailnet needs none: the
+  perimeter is the authentication. A node served by a Worker has no perimeter
+  and requires a bearer token, and the same client has to reach both — so auth
+  belongs here as a per-store detail rather than in six method bodies."
+  [{:keys [http base descriptor headers]}]
   (assert http "an IHttp is required")
   (assert (and (string? base) (seq base)) "a base URL is required")
   (assert (map? descriptor) ":descriptor is required — fetch it with descriptor>")
-  (->HttpNodeStore http (str/replace base #"/+$" "") descriptor))
+  (->HttpNodeStore http (str/replace base #"/+$" "") descriptor (or headers {})))
 
 (defn descriptor>
   "Fetch and VALIDATE a remote node's descriptor.
@@ -131,9 +136,10 @@
   then does arithmetic on. A node that omits `:availability`, or invents a
   profile, must be refused here — otherwise the first place a malformed claim
   shows up is a durability number."
-  [http base]
-  (-> (s3/-request http {:method :get :url (str base "/descriptor")
-                         :headers {} :body (js/Uint8Array. 0)})
+  ([http base] (descriptor> http base {}))
+  ([http base headers]
+   (-> (s3/-request http {:method :get :url (str base "/descriptor")
+                          :headers headers :body (js/Uint8Array. 0)})
       (.then (fn [r]
                (if-not (ok? r)
                  (throw (js/Error. (str "descriptor fetch failed: HTTP " (:status r))))
@@ -143,4 +149,4 @@
                      :failure-domain (into {} (map (fn [[k v]] [k (str v)])) (:failure-domain d))
                      :independence (keyword (:independence d))
                      :availability (keyword (:availability d))
-                     :capabilities (set (map keyword (:capabilities d)))})))))))
+                     :capabilities (set (map keyword (:capabilities d)))}))))))))

@@ -24,7 +24,11 @@
             [kura.node.crypto-noble :as nc]
             [kura.node.store :as store]))
 
-(def layout (lrc/layout {:k 16 :r 4 :g 12}))   ; launch: n=32, 2.0x
+(def layout
+  "The TARGET layout — n=26, 1.625x — whose minimum distance d=8 was established
+  exhaustively rather than bounded. It needs four failure domains (4 x 7 = 28 >=
+  26) and until R2 became reachable as a node there were only three."
+  (lrc/layout {:k 16 :r 4 :g 6}))
 (def shard-bytes 512)
 
 (defn- object-id [run] (str "kura-multidomain-" run))
@@ -82,12 +86,18 @@
                       :availability :always-on
                       :failure-domain {:provider "backblaze-b2"}})]
     (-> (js/Promise.all
-         (clj->js (map (fn [[nm base]]
-                         (-> (hn/descriptor> http base)
-                             (.then (fn [d] [nm (hn/open {:http http :base base :descriptor d})]))))
-                       [["judah" "http://100.113.200.45:8410"]
-                        ["air-ssd" "http://127.0.0.1:8411"]
-                        ["gad" "http://100.82.98.110:8410"]])))
+         (clj->js (map (fn [[nm base hdrs]]
+                         (-> (hn/descriptor> http base hdrs)
+                             (.then (fn [d] [nm (hn/open {:http http :base base :descriptor d
+                                                          :headers hdrs})]))))
+                       [["judah" "http://100.113.200.45:8410" {}]
+                        ["air-ssd" "http://127.0.0.1:8411" {}]
+                        ["gad" "http://100.82.98.110:8410" {}]
+                        ;; R2 through the node protocol, not the S3 API: a
+                        ;; rented bucket is now a fleet member with a URL, so
+                        ;; placement treats it exactly like a Mac mini.
+                        ["r2" "https://kura-r2-node.04-feasts-minded.workers.dev"
+                         {"authorization" (str "Bearer " (.-KURA_NODE_TOKEN js/process.env))}]])))
         ;; NOT js->clj: Promise.all resolves to a JS array whose elements are
         ;; already CLJS vectors holding CLJS records, and js->clj would walk
         ;; into the records and flatten them into seqs.
@@ -98,15 +108,21 @@
   judah and air-ssd share a site, so together they get one domain's budget."
   [stores]
   (let [tol (lrc/max-tolerated-erasures layout)
-        ;; 32 shards, 3 domains, cap 13 -> 11/11/10.
-        plan (concat (repeat 11 ["b2" (get stores "b2")])
-                     ;; fleet-site-1's 11 split across the two boxes in the room
+        ;; 26 shards over FOUR domains, none above the tolerance of 7:
+        ;; b2 7 · fleet-site-1 7 · saitama-sayama 6 · cloudflare-r2 6.
+        ;; Every domain at or under 7 is the exact property worth having — any
+        ;; single domain can vanish and the object is still readable.
+        plan (concat (repeat 7 ["b2" (get stores "b2")])
+                     ;; fleet-site-1's 7 split across the two boxes in the room;
+                     ;; they are one domain however many machines they are.
                      (map (fn [i] (if (even? i) ["judah" (get stores "judah")]
                                       ["air-ssd" (get stores "air-ssd")]))
-                          (range 11))
-                     (repeat 10 ["gad" (get stores "gad")]))]
-    (assert (= (:n layout) (count plan)))
-    (assert (<= 11 tol) (str "cap 11 must be within tolerance " tol))
+                          (range 7))
+                     (repeat 6 ["gad" (get stores "gad")])
+                     (repeat 6 ["r2" (get stores "r2")]))]
+    (assert (= (:n layout) (count plan))
+            (str "plan is " (count plan) " shards, layout wants " (:n layout)))
+    (assert (<= 7 tol) (str "the largest domain holds 7, tolerance is " tol))
     (vec plan)))
 
 (defn- put-all> [assigned run shards]
@@ -167,9 +183,10 @@
                  (println)
                  (-> (scenario> assigned 1 "1 shard lost — the 99% case" [5] true)
                      (.then #(scenario> assigned 2 "a local group plus its parity" [0 1 2 3 16] true))
-                     (.then #(scenario> assigned 3 "7 arbitrary — measured limit of the n=26 code" (range 7) true))
-                     (.then #(scenario> assigned 4 "11 arbitrary — one whole domain's worth" (range 11) true))
-                     (.then #(scenario> assigned 5 "14 — past the bound, must refuse" (range 14) false))))))
+                     (.then #(scenario> assigned 3 "7 arbitrary — the MEASURED distance d=8" (range 7) true))
+                     (.then #(scenario> assigned 4 "b2 gone entirely — shards 0-6" (range 7) true))
+                     (.then #(scenario> assigned 5 "fleet-site-1 gone — the whole Fukuoka room" (range 7 14) true))
+                     (.then #(scenario> assigned 6 "8 — one past the measured distance, must refuse" (range 8) false))))))
       (.catch (fn [e] (println "ERROR" (.-message e)) (set! (.-exitCode js/process) 1)))))
 
 (-main)
