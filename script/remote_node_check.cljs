@@ -20,12 +20,20 @@
   ;; rather than by position — picking index 2 gets --classpath.
   (let [base (or (first (filter #(re-find #"^https?://" %) (vec (.-argv js/process))))
                  "http://127.0.0.1:8410")
+        ;; A node behind a network perimeter needs no token; one served by a
+        ;; Worker does. The same script has to check both.
+        tok (.-KURA_NODE_TOKEN js/process.env)
+        headers (if (and tok (seq tok)) {"authorization" (str "Bearer " tok)} {})
         http (hf/fetch-http)]
     (println "remote node:" base)
-    (-> (hn/descriptor> http base)
+    (println "auth       :" (if (seq headers)
+                              "bearer token from KURA_NODE_TOKEN"
+                              "none (a perimeter, or an ungated node)"))
+    (-> (hn/descriptor> http base headers)
         (.then (fn [d]
                  (println "descriptor :" (pr-str d))
-                 (async/run> (hn/open {:http http :base base :descriptor d}))))
+                 (async/run> (hn/open {:http http :base base :descriptor d
+                                       :headers headers}))))
         (.then (fn [r]
                  (println "over HTTP  :" (:passed r) "/" (:total r)
                           (if (zero? (:failed r)) "PASS" (str "FAIL " (:failures r))))
