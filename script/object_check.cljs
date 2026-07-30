@@ -165,6 +165,66 @@
                                 (if (zero? (count left))
                                   (ok! "a failed write left no shards behind")
                                   (fail! (str (count left) " orphan shards remain")))))))))
+        (.then (fn [_]
+                 ;; Repair: destroy shards, rebuild them, write them back, and
+                 ;; confirm they are actually there afterwards — not merely that
+                 ;; the function returned a number.
+                 (let [size (* 32 1024)
+                       bytes (gf/->bytes (mapv #(mod (* 3 %) 256) (range size)))
+                       plan (manifest/plan {:object-id "obj-repair" :size size
+                                            :stripe-bytes (* 16 1024)} layout)
+                       store-for (fn [_s i] (nth stores (mod i 4)))
+                       ctx {:plan plan :store-for store-for :digest object-check/digest}]
+                   (-> (obj/put-object!> (assoc ctx :bytes bytes))
+                       (.then (fn [r]
+                                (-> (kill> store-for plan 6)
+                                    (.then (fn [_] (obj/repair-object!>
+                                                    (assoc ctx :expect-digest (:digest r)))))
+                                    (.then (fn [rep]
+                                             (if (and (= 6 (:was-missing rep))
+                                                      (= 6 (:rewritten rep))
+                                                      (zero? (:still-failing rep)))
+                                               (ok! "6 destroyed shards rebuilt and written back")
+                                               (fail! (str "repair report: " (pr-str rep))))
+                                             ;; The read after repair must need no
+                                             ;; repair of its own. Anything less
+                                             ;; means the write-back did not land.
+                                             (obj/get-object> (assoc ctx :expect-digest (:digest r)))))
+                                    (.then (fn [g]
+                                             (if (zero? (:repaired g))
+                                               (ok! "after repair the object reads with zero reconstruction")
+                                               (fail! (str "still needed " (:repaired g) " repaired"))))))))))))
+        (.then (fn [_]
+                 ;; The one that matters most. A reconstruction that fails
+                 ;; verification must NOT be written back: that turns a
+                 ;; detectable fault into fleet-wide agreement on the wrong
+                 ;; bytes, and there is no recovery from data that decodes
+                 ;; cleanly everywhere.
+                 (let [size (* 16 1024)
+                       bytes (gf/->bytes (mapv #(mod % 256) (range size)))
+                       plan (manifest/plan {:object-id "obj-badrepair" :size size
+                                            :stripe-bytes (* 16 1024)} layout)
+                       store-for (fn [_s i] (nth stores (mod i 4)))
+                       ctx {:plan plan :store-for store-for :digest object-check/digest}]
+                   (-> (obj/put-object!> (assoc ctx :bytes bytes))
+                       (.then (fn [_] (kill> store-for plan 3)))
+                       (.then (fn [_] (obj/repair-object!>
+                                       (assoc ctx :expect-digest (apply str (repeat 64 "a"))))))
+                       (.then (fn [_] (fail! "repair with a wrong digest should have refused")))
+                       (.catch (fn [e]
+                                 (if (re-find #"refusing to repair" (.-message e))
+                                   (ok! "repair refuses when the reconstruction fails verification")
+                                   (fail! (str "wrong error: " (.-message e))))))
+                       (.then (fn [_]
+                                ;; And it must not have written anything.
+                                (async/-list-shards> (nth stores 0) "obj-badrepair")))
+                       (.then (fn [left]
+                                (let [expect (count (filter #(zero? (mod % 4))
+                                                            (range 3 (:n layout))))]
+                                  (if (= (count left) expect)
+                                    (ok! "and wrote nothing back")
+                                    (fail! (str "expected " expect " shards on store 0, found "
+                                                (count left))))))))))) 
         (.then (fn [_] (fsp/rm root #js {:recursive true :force true})))
         (.catch (fn [e] (fail! (str "threw: " (.-message e))))))))
 
