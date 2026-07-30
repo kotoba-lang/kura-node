@@ -175,16 +175,45 @@
             (str "This build cannot accept customer data: it has no order "
                  "verifier, so it would serve unauthenticated writes. Wire "
                  "kura.order/admit and a coordinator public key first."))
-    (let [s (fs/open {:node-id node-id
+    ;; --keep-alive-ms exposes Node's HTTP server keep-alive window. The DEFAULT
+    ;; IS NODE'S OWN 5000, deliberately: this knob was added while chasing shard
+    ;; writes that failed with ECONNRESET here and UND_ERR_SOCKET on other
+    ;; backends, and the hypothesis it was built for turned out to be wrong.
+    ;;
+    ;; Five hypotheses were tested against isolated nodes and all five came back
+    ;; with zero failures:
+    ;;   concurrency alone            4/8/16/32/64-way, 640 PUTs
+    ;;   a slow disk                  USB SSD at a measured 37 MB/s
+    ;;   cross-process contention     same sweep while another process loaded
+    ;;                                five origins
+    ;;   an idle gap, sequential      8s pause past the 5s keep-alive window
+    ;;   an idle gap then a burst     8s pause, then 8 concurrent PUTs
+    ;;
+    ;; So the knob stays and the default does not move. Changing a default on a
+    ;; falsified hypothesis would be worse than leaving it: the next person
+    ;; debugging this would inherit a setting that looks like a fix and is not.
+    ;; The remaining untested variable is one process interleaving four or five
+    ;; origins, which needs something close to the real ingest to reproduce.
+    ;;
+    ;; What IS known: the failures survive three transport retries, they are
+    ;; classified correctly (absent versus unreachable), and repair converges to
+    ;; zero in two passes. The condition is contained, not understood.
+    ;;
+    ;; headersTimeout must exceed keepAliveTimeout or Node can close mid-request.
+    (let [server-keep-alive-ms (js/parseInt (arg "--keep-alive-ms" "5000"))
+          s (fs/open {:node-id node-id
                       :root root
                       :failure-domain {:operator operator :site site}
                       :independence :independent
                       :availability availability})]
-      (-> (.createServer http (fn [req res] (handle> s req res)))
+      (-> (doto (.createServer http (fn [req res] (handle> s req res)))
+            (aset "keepAliveTimeout" server-keep-alive-ms)
+            (aset "headersTimeout" (+ server-keep-alive-ms 5000)))
           (.listen port
                    (fn []
                      (println "kura node listening on" (str "http://0.0.0.0:" port))
                      (println "  root      :" root)
+                     (println "  keep-alive:" server-keep-alive-ms "ms (--keep-alive-ms; Node default)")
                      (println "  descriptor:" (pr-str (store/-descriptor s)))
                      (println)
                      (println "  Phase 0: no auth, no customer data, no bond.")
