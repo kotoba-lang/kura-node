@@ -149,6 +149,22 @@
   [k]
   (str "shiropico_" (str/replace k "/" "_")))
 
+(defn- already-stored
+  "Keys already in the receipts file, so a re-run resumes instead of restarting.
+
+  Not an optimisation. An ingest that cannot resume has to be run in one
+  uninterrupted go, which for a few hundred objects over four backends means it
+  can never be interrupted for a fix — and every fix so far came from watching it
+  fail partway. Re-writing what is already stored would also churn shards that
+  repair has just brought back to full redundancy."
+  []
+  (if-not (.existsSync fs receipts-path)
+    #{}
+    (try (into #{} (map :key)
+               (js->clj (js/JSON.parse (.readFileSync fs receipts-path "utf8"))
+                        :keywordize-keys true))
+         (catch :default _ #{}))))
+
 (defn -main []
   ;; NOTE on reading the source through -get-shard>: kura.node.s3-async has no
   ;; plain object-get, only the shard-store contract, and GET does not validate
@@ -178,11 +194,12 @@
                  (-> (async/-list-shards> (:src ctx) src-prefix)
                      (.then (fn [keys] (assoc ctx :keys (vec keys)))))))
         (.then (fn [{:keys [keys] :as ctx}]
-                 (let [wanted (->> keys
-                                   (remove #(str/includes? % "/episode/"))
-                                   vec)]
-                   (println (str "  " (count keys) " total, " (count wanted)
-                                 " selected (episode/ excluded)"))
+                 (let [done (already-stored)
+                       selected (->> keys (remove #(str/includes? % "/episode/")) vec)
+                       wanted (vec (remove done selected))]
+                   (println (str "  " (count keys) " total, " (count selected)
+                                 " selected (episode/ excluded), " (count done)
+                                 " already stored, " (count wanted) " to do"))
                    (assoc ctx :wanted wanted))))
         (.then (fn [{:keys [src wanted store-for]}]
                  (println)
@@ -246,8 +263,16 @@
                           (.catch (fn [e]
                                     (println "  ERROR" k "-" (.-message e))
                                     (update acc :failed inc)))))))
+                  ;; Seeded with what is already on disk so a resumed run does
+                  ;; not truncate the receipts of the objects it is skipping —
+                  ;; which would strand them: stored, and unverifiable.
                   (js/Promise.resolve {:stored 0 :skipped 0 :failed 0
-                                       :logical-bytes 0 :physical-bytes 0 :receipts []})
+                                       :logical-bytes 0 :physical-bytes 0
+                                       :receipts (if (.existsSync fs receipts-path)
+                                                   (vec (js->clj (js/JSON.parse
+                                                                  (.readFileSync fs receipts-path "utf8"))
+                                                                 :keywordize-keys true))
+                                                   [])})
                   wanted)))
         (.then (fn [r]
                  (println)
