@@ -247,30 +247,61 @@
                                    (/ (:n (:layout plan)) (:k (:layout plan))))
                 :digest (digest bytes)}))))
 
-(defn- get-stripe> [{:keys [plan store-for]} stripe]
-  (-> (js/Promise.all
+(defn- get-stripe>
+  "Fetch one stripe's shards, distinguishing ABSENT from UNREACHABLE.
+
+  This is the same distinction `kura.node.http-node` makes at the store — 404 is
+  absence, anything else is a transport fact — and the first version of this
+  function threw it away with `(.catch (fn [_] nil))`, complete with a comment
+  arguing that at this layer both just mean \"not in hand\". That comment was
+  wrong and it cost a real verification run: 56 objects had been written and
+  accepted as recoverable, and the read reported one of them as *past the code's
+  distance, 18 shards missing, 13 tolerated*. Nothing was missing. Five shards
+  were absent and thirteen fetches had failed in transit, and the read had no way
+  to say so.
+
+  The consequences of confusing them are not symmetric. Reporting a flaky network
+  as data loss sends an operator looking for a disk that died, and tells a repair
+  scheduler to rebuild shards that are sitting there intact. So both are erasures
+  for the purposes of decoding — the bytes are equally not in hand — and the
+  error, if it comes to one, says which is which."
+  [{:keys [plan store-for]} stripe]
+  (-> (js/Promise.allSettled
        (clj->js (map (fn [i]
-                       (-> (async/-get-shard> (store-for stripe i)
-                                              (manifest/shard-id (:object-id plan) stripe i))
-                           ;; A transport failure is not an absence, but at this
-                           ;; layer both mean "not in hand"; the distinction is
-                           ;; made in the store and matters for repair
-                           ;; scheduling, not for this read.
-                           (.catch (fn [_] nil))))
+                       (async/-get-shard> (store-for stripe i)
+                                          (manifest/shard-id (:object-id plan) stripe i)))
                      (range (:n (:layout plan))))))
-      (.then (fn [got]
-               (let [present (mapv #(when (and % (pos? (gf/blength %))) %) (vec got))
-                     missing (count (filter nil? present))]
-                 (if (zero? missing)
-                   {:shards present :repaired 0}
+      (.then (fn [rs]
+               (let [results (vec rs)
+                     shard-of (fn [i]
+                                (let [r (nth results i)]
+                                  (when (= "fulfilled" (.-status ^js r))
+                                    (let [v (.-value ^js r)]
+                                      (when (and v (pos? (gf/blength v))) v)))))
+                     present (mapv shard-of (range (:n (:layout plan))))
+                     unreachable (into {}
+                                       (keep (fn [i]
+                                               (let [r (nth results i)]
+                                                 (when (= "rejected" (.-status ^js r))
+                                                   [i (some-> (.-reason ^js r) (.-message))]))))
+                                       (range (:n (:layout plan))))
+                     absent (into #{} (remove unreachable)
+                                  (keep-indexed (fn [i s] (when (nil? s) i)) present))
+                     erased (into (set (keys unreachable)) absent)]
+                 (if (empty? erased)
+                   {:shards present :repaired 0 :unreachable {}}
                    (if-let [r (repair present plan)]
-                     {:shards (:shards r) :repaired (:repaired r)}
+                     {:shards (:shards r) :repaired (:repaired r) :unreachable unreachable}
                      (throw (js/Error.
                              (str "stripe " stripe " of " (:object-id plan)
-                                  " is past the code's distance: " missing
-                                  " shards missing, " (lrc/max-tolerated-erasures
-                                                       (:layout plan))
-                                  " tolerated"))))))))))
+                                  " cannot be reconstructed: " (count absent)
+                                  " shard(s) absent and " (count unreachable)
+                                  " unreachable, " (count erased) " total against "
+                                  (lrc/max-tolerated-erasures (:layout plan))
+                                  " tolerated"
+                                  (when (seq unreachable)
+                                    (str ". Unreachable is a transport fact, not data loss — "
+                                         "first: " (val (first unreachable))))))))))))))
 
 (defn get-object>
   "Read `(:object-id plan)` back, repairing stripes as needed.
@@ -289,10 +320,11 @@
                            (-> (get-stripe> ctx stripe)
                                (.then (fn [r] (-> acc
                                                   (update :parts conj (:shards r))
-                                                  (update :repaired + (:repaired r)))))))))
-              (js/Promise.resolve {:parts [] :repaired 0})
+                                                  (update :repaired + (:repaired r))
+                                                  (update :unreachable + (count (:unreachable r))))))))))
+              (js/Promise.resolve {:parts [] :repaired 0 :unreachable 0})
               (range (:stripes plan)))
-      (.then (fn [{:keys [parts repaired]}]
+      (.then (fn [{:keys [parts repaired unreachable]}]
                (let [k (:k (:layout plan))
                      bytes (gf/concat-shards (mapcat #(subvec % 0 k) parts)
                                              (:size plan))
@@ -303,4 +335,9 @@
                                 ": stored " expect-digest ", reconstructed " d
                                 ". The stripes decoded without error, which is "
                                 "exactly why this check exists."))))
-                 {:bytes bytes :digest d :repaired repaired})))))
+                 {:bytes bytes :digest d :repaired repaired
+                  ;; Reported so a caller can tell "the code repaired 8 shards
+                  ;; because 8 disks lost them" from "the code repaired 8 shards
+                  ;; because 8 fetches failed", which are different problems with
+                  ;; different fixes.
+                  :unreachable unreachable})))))

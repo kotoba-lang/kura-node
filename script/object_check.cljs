@@ -92,8 +92,15 @@
                                                       :expect-digest digest})))
                      (.then (fn [_] (fail! "8 destroyed should have thrown")))
                      (.catch (fn [e]
-                               (if (re-find #"past the code's distance" (.-message e))
-                                 (ok! "8 shards destroyed refuses rather than guessing")
+                               ;; The message must name absent vs unreachable.
+                               ;; Deleted shards and failed fetches send an
+                               ;; operator to completely different places, and a
+                               ;; read that says "missing" for both sent one
+                               ;; looking for a dead disk that did not exist.
+                               (if (and (re-find #"cannot be reconstructed" (.-message e))
+                                        (re-find #"8 shard\(s\) absent and 0 unreachable"
+                                                 (.-message e)))
+                                 (ok! "8 destroyed refuses, and says absent rather than unreachable")
                                  (fail! (str "wrong error: " (.-message e)))))))))
         (.then (fn [_]
                  ;; The check that matters: a wrong digest must be refused even
