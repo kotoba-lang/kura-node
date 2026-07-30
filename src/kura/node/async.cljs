@@ -74,6 +74,21 @@
       (check (contains? store/independence-profiles (:independence d))
              "declares exactly one independence profile"))
     (-> (p nil)
+        ;; Clear the fixtures BEFORE asserting they are absent, not only after.
+        ;;
+        ;; The suite already deleted them at the end, which is enough when it
+        ;; finishes — and useless when it does not. A run that throws partway
+        ;; leaves `a` and `b` on the backend, and the NEXT run then fails
+        ;; "absent shard reads as nil" and "absent shard has no size": two
+        ;; false failures that say nothing about the defect and point away from
+        ;; it. That is the worst possible output for a self-check, because the
+        ;; operator runs it precisely when something is already wrong.
+        ;;
+        ;; Observed: a node on Node 18 threw at case 14 of 19, and the re-run
+        ;; reported 17/19 failing the two absent checks instead. The real bug
+        ;; was neither of them.
+        (.then #(-> (-delete-shard!> s a) (.catch (fn [_] false))))
+        (.then #(-> (-delete-shard!> s b) (.catch (fn [_] false))))
         ;; absent
         (.then #(-get-shard> s a))
         (.then (fn [r] (check (nil? r) "absent shard reads as nil")))

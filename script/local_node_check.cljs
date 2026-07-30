@@ -5,6 +5,7 @@
   added without opening an account with anybody. This proves the backend works
   before anyone is asked to run one."
   (:require ["node:fs/promises" :as fsp]
+            ["node:process" :as process]
             ["node:os" :as os]
             ["node:path" :as path]
             [kura.node.async :as async]
@@ -16,7 +17,8 @@
         s (fs/open {:node-id "fs-local"
                     :root root
                     :failure-domain {:operator "self-hosted" :site "local"}
-                    :independence :independent})]
+                    :independence :independent
+                    :availability :always-on})]
     (-> (async/run> s)
         (.then (fn [r]
                  (println "backend :" "kura.node.fs ->" root)
@@ -29,8 +31,10 @@
                  ;; a fleet looks survivable and is not.
                  (let [doms [(store/-descriptor s)
                              (store/descriptor {:node-id "r2" :independence :shared-substrate
+                                                :availability :always-on
                                                 :failure-domain {:provider "cloudflare-r2" :bucket "kura-phase0"}})
                              (store/descriptor {:node-id "b2" :independence :shared-provider
+                                                :availability :always-on
                                                 :failure-domain {:provider "backblaze-b2"}})]
                        spread (fn [shards]
                                 (mapv (fn [i] (let [d (nth doms (mod i (count doms)))]
@@ -44,5 +48,29 @@
                                      " -> domains " (:effective-domains a)
                                      ", largest " (:largest-domain a)
                                      ", survivable " (:survivable? a))))))
-                 (fsp/rm root #js {:recursive true :force true})))
-        (.catch (fn [e] (println "ERROR" (.-message e)))))))
+                 (when-not (zero? (:failed r))
+                   (set! (.-exitCode process) 1))
+                 r))
+        ;; Second round: exactly what a crashed run leaves behind. The suite
+        ;; must clear its own fixtures at the START, or a node that failed once
+        ;; reports two false "absent" failures forever after — pointing the
+        ;; operator away from the real defect at the moment they are debugging.
+        ;; Observed for real on Node 18.19 at a second site.
+        (.then (fn [_]
+                 (println)
+                 (println "poison round: leaving a crashed run's fixtures in place")
+                 (-> (async/-put-shard!> s "obj-async/0/0" (js/Uint8Array. #js [1 2 3 4 5 6 7 8]))
+                     (.then (fn [_] (async/-put-shard!> s "obj-async/0/1" (js/Uint8Array. #js [250 251 252]))))
+                     (.then (fn [_] (async/run> s)))
+                     (.then (fn [r2]
+                              (println "  re-run  :" (:passed r2) "/" (:total r2)
+                                       (if (zero? (:failed r2)) "PASS" (str "FAIL " (:failures r2))))
+                              (when-not (zero? (:failed r2))
+                                (set! (.-exitCode process) 1)))))))
+        (.then (fn [_] (fsp/rm root #js {:recursive true :force true})))
+        (.catch (fn [e]
+                  (println "ERROR" (.-message e))
+                  (set! (.-exitCode process) 1))))))
+
+;; A check you have to invoke by hand from -e is a check nobody runs.
+(-main)
