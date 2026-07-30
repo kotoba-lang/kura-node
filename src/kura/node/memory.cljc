@@ -50,5 +50,9 @@
     (store/descriptor {:node-id node-id
                        :failure-domain {:provider "memory" :process "local"}
                        :independence :shared-substrate
+                       ;; Baked in, and honestly: an in-memory store lives
+                       ;; exactly as long as its process and is reachable for
+                       ;; all of it. There is no sleeping case to declare.
+                       :availability :always-on
                        :capabilities #{:range-read :list :delete
                                        :size-without-read}}))))

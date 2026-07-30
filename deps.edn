@@ -9,7 +9,7 @@
          :git/sha "6b6b95eb8f5733b468e569c59eb58b492e6dc08b"}
         io.github.kotoba-lang/kura
         {:git/url "https://github.com/kotoba-lang/kura.git"
-         :git/sha "d2485630e7ae261d0cb30763bf4c4b746eefdb21"}
+         :git/sha "625aae958638ae5a59e53e502b28492ae4524099"}
         io.github.kotoba-lang/merkle-sum
         {:git/url "https://github.com/kotoba-lang/merkle-sum.git"
          :git/sha "5bb473aed0c0bba6c0ae758d000a6142a5d79891"}

@@ -112,7 +112,7 @@
   machine shares with the rest of their fleet — `{:operator \"alice\" :site
   \"home\"}` says something the audit can use; omitting it says nothing and is
   refused."
-  [{:keys [node-id root prefix failure-domain independence]
+  [{:keys [node-id root prefix failure-domain independence availability]
     :or {prefix "kura" independence :independent}}]
   (assert (and (string? root) (seq root)) "a root directory is required")
   (->FsStore
@@ -121,4 +121,5 @@
     {:node-id node-id
      :failure-domain failure-domain
      :independence independence
+     :availability availability
      :capabilities #{:range-read :list :delete :size-without-read :durable-put}})))

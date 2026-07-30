@@ -56,6 +56,7 @@
      :objects objects
      :store (s3/open {:node-id "s3-0"
                       :independence independence
+                      :availability :always-on
                       :failure-domain failure-domain
                       :endpoint "https://s3.example.com"
                       :host "s3.example.com"
