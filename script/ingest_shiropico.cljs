@@ -223,7 +223,13 @@
                                                           :stripes (:stripes r)
                                                           :digest (:digest r)
                                                           :degraded? (:degraded? r)
-                                                          :missing (:missing-shards r)})
+                                                          :missing (:missing-shards r)
+                                                          ;; The reasons, not only the indices. Added
+                                                          ;; second because I put them in the object
+                                                          ;; layer and forgot the receipt that carries
+                                                          ;; them out — the diagnosis was one field
+                                                          ;; short of being readable.
+                                                          :missing-reasons (:missing-reasons r)})
                                                  (as-> acc2
                                                        (do
                                                          ;; Written after EVERY object, not at the

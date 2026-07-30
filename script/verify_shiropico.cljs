@@ -93,16 +93,18 @@
                                        (-> acc
                                            (update :ok inc)
                                            (update :bytes + (gf/blength (:bytes g)))
-                                           (update :repaired + (:repaired g)))))
+                                           (update :repaired + (:repaired g))
+                                           (update :unreachable + (:unreachable g)))))
                               (.catch (fn [e]
                                         (println "  FAIL" key "-" (.-message e))
                                         (update acc :failed inc))))))))
-                    (js/Promise.resolve {:ok 0 :failed 0 :repaired 0 :bytes 0})
+                    (js/Promise.resolve {:ok 0 :failed 0 :repaired 0 :unreachable 0 :bytes 0})
                     receipts))))
         (.then (fn [r]
                  (println)
-                 (println "verified:" (:ok r) "· failed" (:failed r)
-                          "· stripes repaired on read" (:repaired r))
+                 (println "verified:" (:ok r) "· failed" (:failed r))
+                 (println "repaired on read:" (:repaired r) "shards"
+                          "· of which unreachable rather than absent:" (:unreachable r))
                  (if (zero? (:failed r))
                    (println "every object came back byte-identical to its receipt")
                    (set! (.-exitCode js/process) 1))))
