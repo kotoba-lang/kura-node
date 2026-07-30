@@ -81,6 +81,21 @@
           (.then (fn [r] (json-res res 201 r)))
           (.catch (fn [e] (json-res res 400 {:error (.-message e)}))))
 
+      (and sid (= method "HEAD"))
+      ;; The node declares :size-without-read as a capability and had no way to
+      ;; honour it over its own protocol — a client could only learn a shard's
+      ;; size by downloading it. An audit asks for size across every shard it
+      ;; holds, so answering that by download is exactly the I/O this design
+      ;; exists to avoid.
+      (-> (async/-shard-size> s sid)
+          (.then (fn [n]
+                   (if n
+                     (do (.writeHead res 200 #js {"content-length" (str n)
+                                                  "content-type" "application/octet-stream"})
+                         (.end res))
+                     (do (.writeHead res 404) (.end res)))))
+          (.catch (fn [_] (do (.writeHead res 500) (.end res)))))
+
       (and sid (= method "GET"))
       (let [range (.get (.-searchParams url) "range")]
         (-> (if range
@@ -109,6 +124,7 @@
                   :routes {"GET /descriptor" "who this node claims to be"
                            "GET /self-check" "run the shard-store contract against this disk"
                            "GET /shards?prefix=" "what is held"
+                           "HEAD /shard/<id>" "size without reading the body"
                            "PUT /shard/<id>" "store"
                            "GET /shard/<id>[?range=off,len]" "fetch"
                            "DELETE /shard/<id>" "remove"}
