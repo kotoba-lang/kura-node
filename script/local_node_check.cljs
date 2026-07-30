@@ -5,7 +5,6 @@
   added without opening an account with anybody. This proves the backend works
   before anyone is asked to run one."
   (:require ["node:fs/promises" :as fsp]
-            ["node:process" :as process]
             ["node:os" :as os]
             ["node:path" :as path]
             [kura.node.async :as async]
@@ -49,7 +48,7 @@
                                      ", largest " (:largest-domain a)
                                      ", survivable " (:survivable? a))))))
                  (when-not (zero? (:failed r))
-                   (set! (.-exitCode process) 1))
+                   (set! (.-exitCode js/process) 1))
                  r))
         ;; Second round: exactly what a crashed run leaves behind. The suite
         ;; must clear its own fixtures at the START, or a node that failed once
@@ -66,11 +65,11 @@
                               (println "  re-run  :" (:passed r2) "/" (:total r2)
                                        (if (zero? (:failed r2)) "PASS" (str "FAIL " (:failures r2))))
                               (when-not (zero? (:failed r2))
-                                (set! (.-exitCode process) 1)))))))
+                                (set! (.-exitCode js/process) 1)))))))
         (.then (fn [_] (fsp/rm root #js {:recursive true :force true})))
         (.catch (fn [e]
                   (println "ERROR" (.-message e))
-                  (set! (.-exitCode process) 1))))))
+                  (set! (.-exitCode js/process) 1))))))
 
 ;; A check you have to invoke by hand from -e is a check nobody runs.
 (-main)
